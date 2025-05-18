@@ -7,13 +7,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import webbrowser
-import traceback
 
 import glob
 import time
 
 from logger import Logger
-from colorama import init, Fore, Style
+from colorama import Fore, Style
 
 
 def load_data_from_csv(file_path):
@@ -307,9 +306,9 @@ def connect_to_google_sheets():
         SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         
         # Files for authentication
-        TOKEN_FILE = r"C:\Users\fence\OneDrive\Desktop\Work\KBI\token.json"
-        CLIENT_SECRETS_FILE = r"C:\Users\fence\OneDrive\Desktop\Work\KBI\client_secret.json"
-        
+        TOKEN_FILE = "token.json"
+        CLIENT_SECRETS_FILE = "client_secret.json"
+
         creds = None
         
         # Check if we have valid stored credentials
@@ -671,7 +670,7 @@ def main():
     Logger.header("Yahrzeit List Processor")
     
     # Hardcoded path to the folder containing CSV files
-    folder_path = r"C:\Users\fence\OneDrive\Desktop\CSV"
+    folder_path = r"C:\Users\starl\Desktop\Work\test"
     
     # Check if the folder exists
     if not os.path.isdir(folder_path):
