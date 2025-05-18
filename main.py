@@ -7,8 +7,6 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-import numpy as np
-import json
 
 def load_data_from_csv(file_path):
     """Load data from the CSV file and rename columns to match the required format."""
