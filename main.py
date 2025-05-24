@@ -5,14 +5,65 @@ import re
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+
 from googleapiclient.discovery import build
 import webbrowser
+import traceback
 
 import glob
 import time
 
+from dotenv import load_dotenv
+
+
+
 from logger import Logger
 from colorama import Fore, Style
+
+
+load_dotenv()
+
+CSV_FOLDER_PATH = os.getenv('CSV_FOLDER_PATH', 'csv_files')
+TOKEN_FILE = os.getenv('TOKEN_FILE', 'token.json')
+CLIENT_SECRETS_FILE = os.getenv('CLIENT_SECRETS_FILE', 'client_secret.json')
+
+# Google API settings
+SCOPES = os.getenv('GOOGLE_SCOPES', 'https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive').split(',')
+OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', 'urn:ietf:wg:oauth:2.0:oob')
+LOCAL_SERVER_PORT = int(os.getenv('LOCAL_SERVER_PORT', '8080'))
+
+# File processing settings
+MIN_CSV_FILES_REQUIRED = int(os.getenv('MIN_CSV_FILES_REQUIRED', '3'))
+MAX_CSV_FILES_TO_PROCESS = int(os.getenv('MAX_CSV_FILES_TO_PROCESS', '3'))
+
+# Spreadsheet formatting settings
+FONT_FAMILY = os.getenv('FONT_FAMILY', 'Arial')
+FONT_SIZE = int(os.getenv('FONT_SIZE', '12'))
+HEADER_BACKGROUND = {
+    'red': float(os.getenv('HEADER_BACKGROUND_RED', '0.9')),
+    'green': float(os.getenv('HEADER_BACKGROUND_GREEN', '0.9')),
+    'blue': float(os.getenv('HEADER_BACKGROUND_BLUE', '0.9'))
+}
+
+# Column widths
+COLUMN_WIDTHS = {
+    0: int(os.getenv('COL_DAY_OF_WEEK_WIDTH', '78')),
+    1: int(os.getenv('COL_DATE_WIDTH', '61')),
+    2: int(os.getenv('COL_HEBREW_DAY_WIDTH', '68')),
+    3: int(os.getenv('COL_HEBREW_MONTH_WIDTH', '73')),
+    4: int(os.getenv('COL_DECEASED_FIRST_NAME_WIDTH', '90')),
+    5: int(os.getenv('COL_DECEASED_LAST_NAME_WIDTH', '145')),
+    6: None,  # Calculated dynamically
+    7: int(os.getenv('COL_MOURNER_FIRST_NAME_WIDTH', '90')),
+    8: int(os.getenv('COL_MOURNER_LAST_NAME_WIDTH', '100')),
+    9: int(os.getenv('COL_RELATIONSHIP_WIDTH', '104')),
+    10: int(os.getenv('COL_TRIBE_WIDTH', '60'))
+}
+
+HEBREW_NAME_MIN_WIDTH = int(os.getenv('COL_DECEASED_HEBREW_NAME_MIN_WIDTH', '80'))
+HEBREW_NAME_PIXELS_PER_CHAR = int(os.getenv('HEBREW_NAME_PIXELS_PER_CHAR', '8'))
+HEBREW_NAME_PADDING = int(os.getenv('HEBREW_NAME_PADDING', '30'))
+
 
 
 def load_data_from_csv(file_path):
@@ -27,9 +78,9 @@ def load_data_from_csv(file_path):
         'Observance Hebrew Month': 'Hebrew Month',
         'Deceased First Name': 'Deceased First Name',
         'Deceased Last Name': 'Deceased Last Name',
+        'Deceased Name Hebrew': 'Deceased Hebrew Name',
         'First Name': 'Mourner First Name',
         'Last Name': 'Mourner Last Name',
-        'Hebrew Name': 'Hebrew Name',
         'Relationship deceased to mourner': 'Relationship to mourner',
         'Tribe': 'Tribe'
     })
@@ -39,7 +90,7 @@ def load_data_from_csv(file_path):
 def clean_data(df):
     """Clean data to prevent formatting issues."""
     # Replace NaN values with empty strings
-    df = df.fillna('None')
+    df = df.fillna('')
     
     # Convert 'Hebrew Day' column to string type to avoid type errors
     if 'Hebrew Day' in df.columns:
@@ -55,6 +106,9 @@ def clean_data(df):
         df['Relationship to mourner'] = df['Relationship to mourner'].apply(
             lambda x: x.capitalize() if isinstance(x, str) and x.lower() != 'none' else x
         )
+    
+    if 'Day of the Week' in df.columns:
+        df['Day of the Week'] = df['Day of the Week'].str[:3]
     
     return df
 
@@ -136,7 +190,7 @@ def extract_month_info_from_filename(file_path):
     
     # Try to find a year in the filename (assuming 4-digit year like 2025)
     year_match = re.search(r'20\d{2}', filename)
-    year = int(year_match.group(0)) if year_match else datetime.now().year
+    year = int(year_match.group(0)) if year_match else None
     
     # Try to find a month name in the filename
     month = None
@@ -158,8 +212,23 @@ def extract_month_info_from_filename(file_path):
         except Exception:
             # If that fails, default to current month
             month = datetime.now().month
-    
+            
+     # If no month found, try to extract from date format in the file
+    if year is None:
+        # Try to load the first row to get a date
+        try:
+            df = pd.read_csv(file_path, nrows=1)
+            if 'Yahrzeit Long Date' in df.columns and not df['Yahrzeit Long Date'].empty:
+                date_str = df['Yahrzeit Long Date'].iloc[0]
+                date_obj = parse_date(date_str)
+                if date_obj:
+                    year = date_obj.year
+        except Exception:
+            # If that fails, default to current year
+            year = datetime.now().year
+
     return month, year
+
 
 def find_middle_month_from_files(file_paths):
     """
@@ -178,6 +247,8 @@ def find_middle_month_from_files(file_paths):
     # Return the middle entry
     middle_index = len(month_info) // 2
     return month_info[middle_index]
+
+
 
 def create_weekly_dataframes(df, target_month, target_year):
     """
@@ -210,7 +281,7 @@ def create_weekly_dataframes(df, target_month, target_year):
     
     # Get month name for title
     month_name = datetime(target_year, target_month, 1).strftime('%B')
-    spreadsheet_title = f"{month_name}-{target_year} Yahrzeit List"
+    spreadsheet_title = f"{target_month} {month_name} {target_year}"
     
     # Create weekly dataframes
     weekly_dfs = []
@@ -299,27 +370,37 @@ def group_data_by_date_and_name(df):
     
     return result_df
 
+
 def connect_to_google_sheets():
     """Authenticate and connect to Google Sheets API using OAuth2."""
     try:
-        # Define the scopes
-        SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         
-        # Files for authentication
-        TOKEN_FILE = "token.json"
-        CLIENT_SECRETS_FILE = "client_secret.json"
-
         creds = None
         
         # Check if we have valid stored credentials
         if os.path.exists(TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            try:
+                creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            except Exception as e:
+                Logger.warning(f"Invalid token file: {e}")
+                # Delete the corrupted token file
+                os.remove(TOKEN_FILE)
+                Logger.info("Deleted corrupted token file. Will re-authenticate.")
+                creds = None
         
         # If no valid credentials, request authentication
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
+                try:
+                    creds.refresh(Request())
+                except Exception as e:
+                    Logger.warning(f"Token refresh failed: {e}")
+                    # Delete the token file and re-authenticate
+                    if os.path.exists(TOKEN_FILE):
+                        os.remove(TOKEN_FILE)
+                    creds = None
+            
+            if not creds:
                 if not os.path.exists(CLIENT_SECRETS_FILE):
                     Logger.error(f"{CLIENT_SECRETS_FILE} not found.")
                     Logger.info("Please download your OAuth credentials from Google Cloud Console")
@@ -329,16 +410,16 @@ def connect_to_google_sheets():
                 # Try local server authentication
                 try:
                     flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
-                    creds = flow.run_local_server(port=8080)
+                    creds = flow.run_local_server(port=LOCAL_SERVER_PORT)
                 except Exception as local_error:
                     Logger.error(f"Local server authentication failed: {local_error}")
                     Logger.info("Trying manual authentication instead...")
                     
                     # Fall back to manual authentication
                     flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
-                    flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
+                    flow.redirect_uri = OAUTH_REDIRECT_URI
                     
-                    auth_url, _ = flow.authorization_url(prompt='consent')
+                    auth_url, _ = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
                     Logger.info("\n" + "="*80)
                     Logger.info("Please open this URL in your browser to authenticate:")
                     Logger.info(auth_url)
@@ -361,7 +442,7 @@ def connect_to_google_sheets():
     except Exception as e:
         Logger.error(f"Error connecting to Google Sheets API: {str(e)}")
         return None, None
-
+    
 def create_spreadsheet(drive_service, title="Yahrzeit List"):
     """Create a new Google Sheet and return its ID."""
     try:
@@ -384,7 +465,7 @@ def format_sheet(service, spreadsheet_id, sheet_id):
     try:
         requests = []
         
-        # Format header row - bold, center, and gray background
+        # Format header row - bold, center, gray background, and wrap text
         requests.append({
             'repeatCell': {
                 'range': {
@@ -396,32 +477,55 @@ def format_sheet(service, spreadsheet_id, sheet_id):
                     'userEnteredFormat': {
                         'horizontalAlignment': 'CENTER',
                         'textFormat': {
-                            'fontFamily': 'Arial',
-                            'fontSize': 12,
+                            'fontFamily': FONT_FAMILY,
+                            'fontSize': FONT_SIZE,
                             'bold': True
                         },
-                        'backgroundColor': {
-                            'red': 0.9,
-                            'green': 0.9,
-                            'blue': 0.9
-                        },
-                        'wrapStrategy': 'OVERFLOW_CELL'
+                        'backgroundColor': HEADER_BACKGROUND,
+                        'wrapStrategy': 'WRAP'
                     }
                 },
                 'fields': 'userEnteredFormat(horizontalAlignment,textFormat,backgroundColor,wrapStrategy)'
             }
         })
         
-        # Apply Arial font size 12 bold to all data cells and center align
+        # Apply Arial font size 12 bold to columns A-C (0-2) with center alignment
         requests.append({
             'repeatCell': {
                 'range': {
                     'sheetId': sheet_id,
-                    'startRowIndex': 1  # Start after header
+                    'startRowIndex': 1,  # Start after header
+                    'startColumnIndex': 0,
+                    'endColumnIndex': 3
                 },
                 'cell': {
                     'userEnteredFormat': {
                         'horizontalAlignment': 'CENTER',
+                        'verticalAlignment': 'MIDDLE',
+                        'textFormat': {
+                            'fontFamily': FONT_FAMILY,
+                            'fontSize': FONT_SIZE,
+                            'bold': True
+                        },
+                        'wrapStrategy': 'OVERFLOW_CELL'
+                    }
+                },
+                'fields': 'userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat,wrapStrategy)'
+            }
+        })
+        
+        # Apply Arial font size 12 bold to columns D-K (3-10) with left alignment
+        requests.append({
+            'repeatCell': {
+                'range': {
+                    'sheetId': sheet_id,
+                    'startRowIndex': 1,  # Start after header
+                    'startColumnIndex': 3,
+                    'endColumnIndex': 11
+                },
+                'cell': {
+                    'userEnteredFormat': {
+                        'horizontalAlignment': 'LEFT',
                         'verticalAlignment': 'MIDDLE',
                         'textFormat': {
                             'fontFamily': 'Arial',
@@ -456,7 +560,7 @@ def format_sheet(service, spreadsheet_id, sheet_id):
         Logger.error(f"Error formatting sheet: {e}")
 
 def add_borders_and_resize_columns(service, spreadsheet_id, sheet_id, values):
-    """Add borders to all cells with content and resize columns to fit content."""
+    """Add borders to all cells with content and resize columns to specific sizes."""
     try:
         if not values or len(values) == 0:
             return
@@ -465,17 +569,19 @@ def add_borders_and_resize_columns(service, spreadsheet_id, sheet_id, values):
         max_row = len(values)
         max_col = max(len(row) for row in values)
         
-        # Calculate column widths based on content
-        column_widths = {}
-        
-        for row in values:
-            for col_idx, cell_value in enumerate(row):
-                if cell_value:
-                    # Calculate width based on content length (8 pixels per character + padding)
-                    content_length = len(str(cell_value))
-                    width = max(column_widths.get(col_idx, 0), content_length)
-                    column_widths[col_idx] = width
-        
+        # Define column widths based on requirements
+        column_widths = COLUMN_WIDTHS.copy()
+
+        # Calculate width for "Deceased Hebrew Name" column (index 6) based on content
+        if 6 < max_col:
+            max_content_length = 0
+            for row in values:
+                if len(row) > 6 and row[6]:
+                    content_length = len(str(row[6]))
+                    max_content_length = max(max_content_length, content_length)
+            # Set minimum width of 80 pixels, with 8 pixels per character + padding
+            column_widths[6] = max(HEBREW_NAME_MIN_WIDTH, max_content_length * HEBREW_NAME_PIXELS_PER_CHAR + HEBREW_NAME_PADDING)
+
         # Add borders to the entire content area
         requests = [{
             'updateBorders': {
@@ -496,27 +602,24 @@ def add_borders_and_resize_columns(service, spreadsheet_id, sheet_id, values):
         }]
         
         # Add column width adjustment requests
-        for col_idx, width in column_widths.items():
-            # Convert to Google Sheets column width (pixels ÷ 8)
-            pixel_width = width * 8 + 30  # 8 pixels per character + 30 pixels padding
-            
-            # Ensure minimum width
-            pixel_width = max(pixel_width, 100)
-            
-            requests.append({
-                'updateDimensionProperties': {
-                    'range': {
-                        'sheetId': sheet_id,
-                        'dimension': 'COLUMNS',
-                        'startIndex': col_idx,
-                        'endIndex': col_idx + 1
-                    },
-                    'properties': {
-                        'pixelSize': pixel_width
-                    },
-                    'fields': 'pixelSize'
-                }
-            })
+        for col_idx in range(min(max_col, 11)):  # Only process up to column K (index 10)
+            if col_idx in column_widths and column_widths[col_idx] is not None:
+                pixel_width = column_widths[col_idx]
+                
+                requests.append({
+                    'updateDimensionProperties': {
+                        'range': {
+                            'sheetId': sheet_id,
+                            'dimension': 'COLUMNS',
+                            'startIndex': col_idx,
+                            'endIndex': col_idx + 1
+                        },
+                        'properties': {
+                            'pixelSize': pixel_width
+                        },
+                        'fields': 'pixelSize'
+                    }
+                })
         
         # Execute the formatting requests
         body = {'requests': requests}
@@ -548,6 +651,7 @@ def prepare_data_for_sheets(df):
     
     return values
 
+   
 def create_and_populate_sheets(service, drive_service, master_df, weekly_sheets, sheet_names, spreadsheet_title):
     """Create a new spreadsheet, populate it with data and apply formatting."""
     try:
@@ -617,7 +721,7 @@ def create_and_populate_sheets(service, drive_service, master_df, weekly_sheets,
         # Populate and format weekly sheets with progress
         total_sheets = len(weekly_sheets)
         for idx, (weekly_df, sheet_name) in enumerate(zip(weekly_sheets, sheet_names), 1):
-            with Logger.progress(range(4), desc=f"Processing sheet {idx}/{total_sheets}") as pbar:
+            with Logger.progress(range(5), desc=f"Processing sheet {idx}/{total_sheets}") as pbar:  # Changed from 4 to 5
                 weekly_values = prepare_data_for_sheets(weekly_df)
                 pbar.update(1)
                 
@@ -635,6 +739,7 @@ def create_and_populate_sheets(service, drive_service, master_df, weekly_sheets,
                 
                 add_borders_and_resize_columns(service, spreadsheet_id, sheet_properties[sheet_name], weekly_values)
                 pbar.update(1)
+                
 
         Logger.success(f"Successfully created spreadsheet: {spreadsheet_title}")
         Logger.success(f"Access your spreadsheet at: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
@@ -645,7 +750,6 @@ def create_and_populate_sheets(service, drive_service, master_df, weekly_sheets,
 
     except Exception as e:
         Logger.error(f"Error creating and populating sheets: {e}")
-        import traceback
         traceback.print_exc()
 
 def load_and_combine_data(file_paths):
@@ -670,7 +774,7 @@ def main():
     Logger.header("Yahrzeit List Processor")
     
     # Hardcoded path to the folder containing CSV files
-    folder_path = r"C:\Users\starl\Desktop\Work\test"
+    folder_path = CSV_FOLDER_PATH
     
     # Check if the folder exists
     if not os.path.isdir(folder_path):
@@ -682,12 +786,12 @@ def main():
     file_paths = glob.glob(os.path.join(folder_path, "*.csv"))
     
     # Check if at least three CSV files are found
-    if len(file_paths) < 3:
+    if len(file_paths) < MIN_CSV_FILES_REQUIRED:
         Logger.error(f"Found only {len(file_paths)} CSV files in '{folder_path}'. At least three CSV files are required.")
         return
     
     # If more than three files found, use the three most recent by modification time
-    if len(file_paths) > 3:
+    if len(file_paths) > MIN_CSV_FILES_REQUIRED:
         Logger.warning(f"Found {len(file_paths)} CSV files - using the three most recent")
         file_paths.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         file_paths = file_paths[:3]
