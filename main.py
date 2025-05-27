@@ -15,11 +15,8 @@ import time
 
 from dotenv import load_dotenv
 
-
-
 from logger import Logger
 from colorama import Fore, Style
-
 
 load_dotenv()
 
@@ -471,7 +468,9 @@ def format_sheet(service, spreadsheet_id, sheet_id):
                 'range': {
                     'sheetId': sheet_id,
                     'startRowIndex': 0,
-                    'endRowIndex': 1
+                    'endRowIndex': 1,
+                    'startColumnIndex': 0,
+                    'endColumnIndex': 11  # A–K (inclusive)
                 },
                 'cell': {
                     'userEnteredFormat': {
@@ -488,7 +487,7 @@ def format_sheet(service, spreadsheet_id, sheet_id):
                 'fields': 'userEnteredFormat(horizontalAlignment,textFormat,backgroundColor,wrapStrategy)'
             }
         })
-        
+
         # Apply Arial font size 12 bold to columns A-C (0-2) with center alignment
         requests.append({
             'repeatCell': {
