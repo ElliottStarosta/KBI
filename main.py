@@ -278,7 +278,7 @@ def create_weekly_dataframes(df, target_month, target_year):
     
     # Get month name for title
     month_name = datetime(target_year, target_month, 1).strftime('%B')
-    spreadsheet_title = f"{target_month} {month_name} {target_year}"
+    spreadsheet_title = f"{target_month} {month_name} {target_year} Yahrzeit List"
     
     # Create weekly dataframes
     weekly_dfs = []
