@@ -278,7 +278,7 @@ def create_weekly_dataframes(df, target_month, target_year):
     
     # Get month name for title
     month_name = datetime(target_year, target_month, 1).strftime('%B')
-    spreadsheet_title = f"{target_month} {month_name} {target_year} Yahrzeit List"
+    spreadsheet_title = f"{target_month} {month_name} {target_year}"
     
     # Create weekly dataframes
     weekly_dfs = []
@@ -322,48 +322,106 @@ def create_weekly_dataframes(df, target_month, target_year):
         master_df = df_sorted.drop(columns=['_date_obj'])
     
     return weekly_dfs, sheet_names, master_df, spreadsheet_title
+# def group_data_by_date_and_name(df):
+#     """
+#     Group data by date, and within each date group by deceased name.
+#     Blanks out repeated fields according to the rules.
+#     """
+#     # Create a copy of the dataframe
+#     result_df = df.copy()
+    
+#     # Add grouping columns
+#     result_df['date_group'] = (result_df['Date'] != result_df['Date'].shift()).cumsum()
+    
+#     # Process each date group
+#     for group_id in result_df['date_group'].unique():
+#         group_mask = result_df['date_group'] == group_id
+#         group_indices = result_df.index[group_mask].tolist()
+        
+#         # Blank out date fields for all but the first row in each date group
+#         if len(group_indices) > 1:
+#             for idx in group_indices[1:]:
+#                 result_df.at[idx, 'Day of the Week'] = ''
+#                 result_df.at[idx, 'Date'] = ''
+#                 result_df.at[idx, 'Hebrew Day'] = ''
+#                 result_df.at[idx, 'Hebrew Month'] = ''
+                
+        
+#         # Create a sub-grouping for deceased names within this date group
+#         sub_df = result_df[group_mask].copy()
+#         sub_df['deceased_name'] = sub_df['Deceased Last Name'] + '|' + sub_df['Deceased First Name']
+#         sub_df['name_group'] = (sub_df['deceased_name'] != sub_df['deceased_name'].shift()).cumsum()
+        
+#         # Process each name group within the date group
+#         for name_group_id in sub_df['name_group'].unique():
+#             name_mask = sub_df['name_group'] == name_group_id
+#             name_indices = sub_df.index[name_mask].tolist()
+            
+#             # Blank out name fields for all but the first row in each name group
+#             if len(name_indices) > 1:
+#                 for idx in name_indices[1:]:
+#                     result_df.at[idx, 'Deceased First Name'] = ''
+#                     result_df.at[idx, 'Deceased Last Name'] = ''
+#                     result_df.at[idx, 'Deceased Hebrew Name'] = ''
+    
+#     # Remove helper columns
+#     result_df = result_df.drop(columns=['date_group'])
+    
+#     return result_df
+
 def group_data_by_date_and_name(df):
     """
-    Group data by date, and within each date group by deceased name.
-    Blanks out repeated fields according to the rules.
+    Group data hierarchically by each column, blanking out repeated values
+    to create a clean cascading visual effect.
     """
     # Create a copy of the dataframe
     result_df = df.copy()
     
-    # Add grouping columns
-    result_df['date_group'] = (result_df['Date'] != result_df['Date'].shift()).cumsum()
+    # Define the hierarchical grouping columns in order
+    grouping_columns = [
+        'Day of the Week',
+        'Date', 
+        'Hebrew Day',
+        'Hebrew Month',
+        'Deceased First Name',
+        'Deceased Last Name', 
+        'Deceased Hebrew Name',
+        'Mourner First Name',
+        'Mourner Last Name',
+        'Relationship to mourner',
+        'Tribe'
+    ]
     
-    # Process each date group
-    for group_id in result_df['date_group'].unique():
-        group_mask = result_df['date_group'] == group_id
-        group_indices = result_df.index[group_mask].tolist()
+    # Only process columns that actually exist in the dataframe
+    existing_columns = [col for col in grouping_columns if col in result_df.columns]
+    
+    # Create grouping keys for each level
+    for i, col in enumerate(existing_columns):
+        if i == 0:
+            # First column - group by itself
+            result_df[f'group_{i}'] = (result_df[col] != result_df[col].shift()).cumsum()
+        else:
+            # Subsequent columns - group by combination of all previous columns plus current
+            combined_key = result_df[existing_columns[:i+1]].astype(str).agg('|'.join, axis=1)
+            result_df[f'group_{i}'] = (combined_key != combined_key.shift()).cumsum()
+    
+    # Apply blanking logic for each grouping level
+    for i, col in enumerate(existing_columns):
+        group_col = f'group_{i}'
         
-        # Blank out date fields for all but the first row in each date group
-        if len(group_indices) > 1:
-            for idx in group_indices[1:]:
-                result_df.at[idx, 'Day of the Week'] = ''
-                result_df.at[idx, 'Date'] = ''
-                result_df.at[idx, 'Hebrew Day'] = ''
-                result_df.at[idx, 'Hebrew Month'] = ''
-        
-        # Create a sub-grouping for deceased names within this date group
-        sub_df = result_df[group_mask].copy()
-        sub_df['deceased_name'] = sub_df['Deceased Last Name'] + '|' + sub_df['Deceased First Name']
-        sub_df['name_group'] = (sub_df['deceased_name'] != sub_df['deceased_name'].shift()).cumsum()
-        
-        # Process each name group within the date group
-        for name_group_id in sub_df['name_group'].unique():
-            name_mask = sub_df['name_group'] == name_group_id
-            name_indices = sub_df.index[name_mask].tolist()
+        # Process each group
+        for group_id in result_df[group_col].unique():
+            group_mask = result_df[group_col] == group_id
+            group_indices = result_df.index[group_mask].tolist()
             
-            # Blank out name fields for all but the first row in each name group
-            if len(name_indices) > 1:
-                for idx in name_indices[1:]:
-                    result_df.at[idx, 'Deceased First Name'] = ''
-                    result_df.at[idx, 'Deceased Last Name'] = ''
+            # Blank out this column for all but the first occurrence in the group
+            if len(group_indices) > 1:
+                for idx in group_indices[1:]:
+                    result_df.at[idx, col] = ''
     
     # Remove helper columns
-    result_df = result_df.drop(columns=['date_group'])
+    helper_columns = [col for col in result_df.columns if col.startswith('group_')]
+    result_df = result_df.drop(columns=helper_columns)
     
     return result_df
 
@@ -574,6 +632,8 @@ def add_borders_and_resize_columns(service, spreadsheet_id, sheet_id, values):
         # Calculate width for "Deceased Hebrew Name" column (index 6) based on content
         if 6 < max_col:
             max_content_length = 0
+            
+        
             for row in values:
                 if len(row) > 6 and row[6]:
                     content_length = len(str(row[6]))
